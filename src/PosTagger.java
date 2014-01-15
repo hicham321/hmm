@@ -1,6 +1,5 @@
 import java.io.BufferedReader;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.PrintWriter;
 import java.util.ArrayList;
@@ -14,11 +13,14 @@ public class PosTagger {
 	private static final String lexiconPath = "C:\\Users\\Thomas Zhang\\Documents\\Eclipse EE\\workspace\\cs446-hw6\\data\\HW6.lexicon.txt";
 	private static final String trainPath = "C:\\Users\\Thomas Zhang\\Documents\\Eclipse EE\\workspace\\cs446-hw6\\data\\HW6.train.txt";
 	private static final String outputPath = "C:\\Users\\Thomas Zhang\\Documents\\Eclipse EE\\workspace\\cs446-hw6\\output\\HW6.out.txt";
+	private static final String outputHMMPath = "C:\\Users\\Thomas Zhang\\Documents\\Eclipse EE\\workspace\\cs446-hw6\\output\\HW6.outHmm.txt";
 
 	private static String[] train = null;
 
 	private static Map<String, HashMap<String, Double>> label2Words = new HashMap<String, HashMap<String, Double>>();
 	private static Map<String, Double> labelCounts = new HashMap<String, Double>();
+
+	private static List<HashMap<String, ArrayList<Integer>>> wordIndices = new ArrayList<HashMap<String, ArrayList<Integer>>>();
 
 	private static Map<String, HashMap<String, Double>> transition = new HashMap<String, HashMap<String, Double>>();
 	private static Map<String, HashMap<String, Double>> emission = new HashMap<String, HashMap<String, Double>>();
@@ -30,7 +32,29 @@ public class PosTagger {
 	private static List<Map<String, List<Double>>> gammas = new ArrayList<Map<String, List<Double>>>();
 	private static List<Map<String, HashMap<String, Double>>> xis = new ArrayList<Map<String, HashMap<String, Double>>>();
 
-	// private static final double epsilon = 0.001;
+	private static final double epsilon = 0.01;
+
+	public static double logAdd(double logX, double logY) {
+		// 1. make X the max
+		if (logY > logX) {
+			double temp = logX;
+			logX = logY;
+			logY = temp;
+		}
+		// 2. now X is bigger
+		if (logX == Double.NEGATIVE_INFINITY) {
+			return logX;
+		}
+		// 3. how far "down" (think decibels) is logY from logX?
+		// if it's really small (20 orders of magnitude smaller), then ignore
+		double negDiff = logY - logX;
+		if (negDiff < -20) {
+			return logX;
+		}
+		// 4. otherwise use some nice algebra to stay in the log domain
+		// (except for negDiff)
+		return logX + java.lang.Math.log(1.0 + java.lang.Math.exp(negDiff));
+	}
 
 	private static void loadLexicon() throws Exception {
 		System.out.println("loadLexicon()");
@@ -68,6 +92,59 @@ public class PosTagger {
 		br.close();
 	}
 
+	private static void loadTrain() throws Exception {
+		System.out.println("loadTrain()");
+
+		FileInputStream fis = new FileInputStream(trainPath);
+		String trainText = IOUtils.toString(fis);
+		train = trainText.split("\\n"); // train is split by sentences
+		fis.close();
+	}
+
+	private static void loadWordIndices() {
+		System.out.println("loadWordIndices()");
+
+		for (int i = 0; i < train.length; ++i) {
+			wordIndices.add(new HashMap<String, ArrayList<Integer>>());
+		}
+		for (int i = 0; i < train.length; ++i) {
+			HashMap<String, ArrayList<Integer>> indices = wordIndices.get(i);
+			String[] words = train[i].split("\\s+");
+			for (String word : words) {
+				ArrayList<Integer> index = new ArrayList<Integer>();
+				for (int j = 0; j < words.length; ++j) {
+					if (words[j].equals(word)) {
+						index.add(j);
+					}
+				}
+				indices.put(word, index);
+			}
+			wordIndices.set(i, indices);
+		}
+	}
+
+	private static void initialize() {
+		initTransition();
+		initEmission();
+		initInitial();
+
+		for (int i = 0; i < train.length; ++i) {
+			initForward(i);
+		}
+
+		for (int i = 0; i < train.length; ++i) {
+			initBackward(i);
+		}
+
+		for (int i = 0; i < train.length; ++i) {
+			initGamma(i);
+		}
+
+		for (int i = 0; i < train.length; ++i) {
+			initXi(i);
+		}
+	}
+
 	private static void initTransition() {
 		System.out.println("initTransition()");
 
@@ -78,7 +155,7 @@ public class PosTagger {
 		for (String labelRow : label2Words.keySet()) {
 			HashMap<String, Double> labelMap = transition.get(labelRow);
 			for (String labelCol : label2Words.keySet()) {
-				labelMap.put(labelCol, prob);
+				labelMap.put(labelCol, Math.log(prob));
 			}
 			transition.put(labelRow, labelMap);
 		}
@@ -94,7 +171,8 @@ public class PosTagger {
 			HashMap<String, Double> wordMap = label2Words.get(label);
 			HashMap<String, Double> eWordMap = emission.get(label);
 			for (String word : wordMap.keySet()) {
-				eWordMap.put(word, wordMap.get(word) / labelCounts.get(label));
+				eWordMap
+						.put(word, Math.log(wordMap.get(word) / labelCounts.get(label)));
 			}
 			emission.put(label, eWordMap);
 		}
@@ -105,48 +183,57 @@ public class PosTagger {
 
 		double prob = 1.0 / label2Words.keySet().size();
 		for (String label : label2Words.keySet()) {
-			initial.put(label, prob);
+			initial.put(label, Math.log(prob));
 		}
-	}
-
-	private static void loadTrain() throws Exception {
-		System.out.println("loadTrain()");
-
-		FileInputStream fis = new FileInputStream(trainPath);
-		String trainText = IOUtils.toString(fis);
-		train = trainText.split("\\n"); // train is split by sentences
-		fis.close();
 	}
 
 	private static void executeBaumWelch() throws Exception {
 		System.out.println("executeBaumWelch()");
 
-		forward();
-		backward();
-		gamma();
-		xi();
+		double logLHPrev = 0.0;
+		double logLHNext = 0.0;
+		int numIter = 0;
+		do {
+			for (int i = 0; i < train.length; ++i) {
+				startForward(i);
+				recurseForward(i);
+			}
 
-		updateTransition();
-		updateEmission();
-		updateInitial();
-	}
+			for (int i = 0; i < train.length; ++i) {
+				startBackward(i);
+				recurseBackward(i);
+			}
 
-	private static void forward() {
-		System.out.println("forward()");
+			for (int i = 0; i < train.length; ++i) {
+				computeGamma(i);
+			}
 
-		for (int i = 0; i < train.length; ++i) {
-			initForward(i);
-			recurseForward(i);
-		}
-	}
+			for (int i = 0; i < train.length; ++i) {
+				computeXi(i);
+			}
 
-	private static void backward() {
-		System.out.println("backward()");
+			updateTransition();
+			updateEmission();
+			updateInitial();
 
-		for (int i = 0; i < train.length; ++i) {
-			initBackward(i);
-			recurseBackward(i);
-		}
+			double LH = 0.0;
+			for (Map<String, List<Double>> forward : forwards) {
+				double sentLH = 0.0;
+				for (String label : forward.keySet()) {
+					List<Double> wordArr = forward.get(label);
+					sentLH = logAdd(sentLH, wordArr.get(wordArr.size() - 1));
+				}
+				LH = logAdd(LH, sentLH);
+			}
+
+			++numIter;
+			logLHPrev = logLHNext;
+			logLHNext = LH;
+			System.out.println("logLHPrev = " + logLHPrev);
+			System.out.println("logLHNext = " + logLHNext);
+			System.out.println(numIter + " = " + (logLHNext - logLHPrev));
+
+		} while ((logLHNext - logLHPrev) >= epsilon);
 	}
 
 	private static void initForward(int trainIdx) {
@@ -154,7 +241,6 @@ public class PosTagger {
 		String sent = train[trainIdx];
 		String[] words = sent.split("\\s+");
 
-		// setup trellis
 		for (String label : label2Words.keySet()) {
 			trellis.put(label, new ArrayList<Double>());
 		}
@@ -166,7 +252,14 @@ public class PosTagger {
 			trellis.put(label, wordArr);
 		}
 
-		// init trellis
+		forwards.add(trellis);
+	}
+
+	private static void startForward(int trainIdx) {
+		Map<String, List<Double>> trellis = forwards.get(trainIdx);
+		String sent = train[trainIdx];
+		String[] words = sent.split("\\s+");
+
 		for (String label : trellis.keySet()) {
 			List<Double> wordArr = trellis.get(label);
 			Double initProb = initial.get(label);
@@ -174,11 +267,11 @@ public class PosTagger {
 			if (emissProb == null) {
 				emissProb = 0.0;
 			}
-			wordArr.set(0, initProb * emissProb);
+			wordArr.set(0, initProb + emissProb);
 			trellis.put(label, wordArr);
 		}
 
-		forwards.add(trellis);
+		forwards.set(trainIdx, trellis);
 	}
 
 	private static void recurseForward(int trainIdx) {
@@ -186,7 +279,6 @@ public class PosTagger {
 		String sent = train[trainIdx];
 		String[] words = sent.split("\\s+");
 
-		// fill trellis
 		for (int i = 1; i < words.length; ++i) {
 			for (String label : trellis.keySet()) {
 				List<Double> wordArr = trellis.get(label);
@@ -198,7 +290,7 @@ public class PosTagger {
 					if (emissProb == null) {
 						emissProb = 0.0;
 					}
-					prob += priorProb * transProb * emissProb;
+					prob = logAdd(prob, priorProb + transProb + emissProb);
 				}
 				wordArr.set(i, prob);
 				trellis.put(label, wordArr);
@@ -213,7 +305,6 @@ public class PosTagger {
 		String sent = train[trainIdx];
 		String[] words = sent.split("\\s+");
 
-		// setup trellis
 		for (String label : label2Words.keySet()) {
 			trellis.put(label, new ArrayList<Double>());
 		}
@@ -224,15 +315,22 @@ public class PosTagger {
 			}
 			trellis.put(label, wordArr);
 		}
+		
+		backwards.add(trellis);
+	}
 
-		// init trellis
+	private static void startBackward(int trainIdx) {
+		Map<String, List<Double>> trellis = backwards.get(trainIdx);
+		String sent = train[trainIdx];
+		String[] words = sent.split("\\s+");
+
 		for (String label : trellis.keySet()) {
 			List<Double> wordArr = trellis.get(label);
-			wordArr.set(words.length - 1, 1.0);
+			wordArr.set(words.length - 1, Math.log(1.0));
 			trellis.put(label, wordArr);
 		}
 
-		backwards.add(trellis);
+		backwards.set(trainIdx, trellis);
 	}
 
 	private static void recurseBackward(int trainIdx) {
@@ -240,7 +338,6 @@ public class PosTagger {
 		String sent = train[trainIdx];
 		String[] words = sent.split("\\s+");
 
-		// fill trellis
 		for (int i = words.length - 2; i >= 0; --i) {
 			for (String label : trellis.keySet()) {
 				List<Double> wordArr = trellis.get(label);
@@ -252,7 +349,7 @@ public class PosTagger {
 					if (emissProb == null) {
 						emissProb = 0.0;
 					}
-					prob += priorProb * transProb * emissProb;
+					prob = logAdd(prob, priorProb + transProb + emissProb);
 				}
 				wordArr.set(i, prob);
 				trellis.put(label, wordArr);
@@ -262,22 +359,12 @@ public class PosTagger {
 		backwards.set(trainIdx, trellis);
 	}
 
-	private static void gamma() {
-		System.out.println("gamma()");
-
-		for (int i = 0; i < train.length; ++i) {
-			computeGamma(i);
-		}
-	}
-
-	private static void computeGamma(int trainIdx) {
+	private static void initGamma(int trainIdx) {
 		Map<String, List<Double>> gamma = new HashMap<String, List<Double>>();
 		Map<String, List<Double>> fTrellis = forwards.get(trainIdx);
-		Map<String, List<Double>> bTrellis = backwards.get(trainIdx);
 		String sent = train[trainIdx];
 		String[] words = sent.split("\\s+");
 
-		// setup gamma
 		for (String label : fTrellis.keySet()) {
 			gamma.put(label, new ArrayList<Double>());
 		}
@@ -288,43 +375,40 @@ public class PosTagger {
 			}
 		}
 
-		// fill gamma
+		gammas.add(gamma);
+	}
+
+	private static void computeGamma(int trainIdx) {
+		Map<String, List<Double>> gamma = gammas.get(trainIdx);
+		Map<String, List<Double>> fTrellis = forwards.get(trainIdx);
+		Map<String, List<Double>> bTrellis = backwards.get(trainIdx);
+		String sent = train[trainIdx];
+		String[] words = sent.split("\\s+");
+
 		for (String label : gamma.keySet()) {
 			List<Double> wordArr = gamma.get(label);
 			for (int i = 0; i < words.length; ++i) {
 				Double fNum = fTrellis.get(label).get(i);
 				Double bNum = bTrellis.get(label).get(i);
-				double num = fNum * bNum;
+				double num = fNum + bNum;
 				double denom = 0.0;
 				for (String pLabel : fTrellis.keySet()) {
 					Double fDenom = fTrellis.get(pLabel).get(i);
 					Double bDenom = bTrellis.get(pLabel).get(i);
-					denom += fDenom * bDenom;
+					denom = logAdd(denom, fDenom + bDenom);
 				}
 				wordArr.set(i, num / denom);
 			}
 			gamma.put(label, wordArr);
 		}
 
-		gammas.add(gamma);
+		gammas.set(trainIdx, gamma);
 	}
 
-	private static void xi() {
-		System.out.println("xi()");
-
-		for (int i = 0; i < train.length; ++i) {
-			computeXi(i);
-		}
-	}
-
-	private static void computeXi(int trainIdx) {
+	private static void initXi(int trainIdx) {
 		Map<String, HashMap<String, Double>> xi = new HashMap<String, HashMap<String, Double>>();
 		Map<String, List<Double>> fTrellis = forwards.get(trainIdx);
-		Map<String, List<Double>> bTrellis = backwards.get(trainIdx);
-		String sent = train[trainIdx];
-		String[] words = sent.split("\\s+");
 
-		// setup xi
 		for (String label : fTrellis.keySet()) {
 			xi.put(label, new HashMap<String, Double>());
 		}
@@ -336,7 +420,16 @@ public class PosTagger {
 			xi.put(label, labelMap);
 		}
 
-		// fill xi
+		xis.add(xi);
+	}
+
+	private static void computeXi(int trainIdx) {
+		Map<String, HashMap<String, Double>> xi = xis.get(trainIdx);
+		Map<String, List<Double>> fTrellis = forwards.get(trainIdx);
+		Map<String, List<Double>> bTrellis = backwards.get(trainIdx);
+		String sent = train[trainIdx];
+		String[] words = sent.split("\\s+");
+
 		for (String label : xi.keySet()) {
 			HashMap<String, Double> labelMap = xi.get(label);
 			for (String pLabel : labelMap.keySet()) {
@@ -349,21 +442,21 @@ public class PosTagger {
 					if (eNum == null) {
 						eNum = 0.0;
 					}
-					double num = fNum * bNum * tNum * eNum;
+					double num = fNum + bNum + tNum + eNum;
 					double denom = 0.0;
 					for (String ppLabel : fTrellis.keySet()) {
 						Double fDenom = fTrellis.get(ppLabel).get(i);
 						Double bDenom = bTrellis.get(ppLabel).get(i);
-						denom += fDenom * bDenom;
+						denom = logAdd(denom, fDenom + bDenom);
 					}
-					prob += num / denom;
+					prob = logAdd(prob, num / denom);
 				}
 				labelMap.put(pLabel, prob);
 			}
 			xi.put(label, labelMap);
 		}
 
-		xis.add(xi);
+		xis.set(trainIdx, xi);
 	}
 
 	private static void updateTransition() {
@@ -379,7 +472,7 @@ public class PosTagger {
 				String[] words = sent.split("\\s+");
 				Map<String, List<Double>> gamma = gammas.get(trainIdx);
 				for (int i = 0; i < words.length - 1; ++i) {
-					denom += gamma.get(label).get(i);
+					denom = logAdd(denom, gamma.get(label).get(i));
 				}
 			}
 
@@ -387,7 +480,7 @@ public class PosTagger {
 			for (String pLabel : labelMap.keySet()) {
 				double num = 0.0;
 				for (Map<String, HashMap<String, Double>> xi : xis) {
-					num += xi.get(label).get(pLabel);
+					num = logAdd(num, xi.get(label).get(pLabel));
 				}
 				labelMap.put(pLabel, num / denom);
 			}
@@ -409,7 +502,7 @@ public class PosTagger {
 				String[] words = sent.split("\\s+");
 				Map<String, List<Double>> gamma = gammas.get(trainIdx);
 				for (int i = 0; i < words.length; ++i) {
-					denom += gamma.get(label).get(i);
+					denom = logAdd(denom, gamma.get(label).get(i));
 				}
 			}
 
@@ -417,12 +510,14 @@ public class PosTagger {
 			for (String word : wordMap.keySet()) {
 				double num = 0.0;
 				for (int trainIdx = 0; trainIdx < train.length; ++trainIdx) {
-					String sent = train[trainIdx];
-					String[] words = sent.split("\\s+");
+					HashMap<String, ArrayList<Integer>> indices = wordIndices
+							.get(trainIdx);
 					Map<String, List<Double>> gamma = gammas.get(trainIdx);
-					for (int i = 0; i < words.length; ++i) {
-						if (word.equals(words[i])) {
-							num += gamma.get(label).get(i);
+
+					ArrayList<Integer> index = indices.get(word);
+					if (index != null) {
+						for (int idx : index) {
+							num = logAdd(num, gamma.get(label).get(idx));
 						}
 					}
 				}
@@ -440,13 +535,46 @@ public class PosTagger {
 			double prob = 0.0;
 			for (int trainIdx = 0; trainIdx < train.length; ++trainIdx) {
 				Map<String, List<Double>> gamma = gammas.get(trainIdx);
-				prob += gamma.get(label).get(0);
+				prob = logAdd(prob, gamma.get(label).get(0));
 			}
 			initial.put(label, prob);
 		}
 	}
 
+	private static void printHMM() throws Exception {
+		PrintWriter writer = new PrintWriter(outputHMMPath, "UTF-8");
+
+		writer.println("Transition");
+		for (String label : transition.keySet()) {
+			writer.print(label + ": ");
+			HashMap<String, Double> labelMap = transition.get(label);
+			for (String pLabel : labelMap.keySet()) {
+				writer.print(pLabel + "-" + labelMap.get(pLabel) + " ");
+			}
+			writer.println();
+		}
+
+		writer.println("Emission");
+		for (String label : emission.keySet()) {
+			writer.print(label + ": ");
+			HashMap<String, Double> wordMap = emission.get(label);
+			for (String word : wordMap.keySet()) {
+				writer.print(word + "-" + wordMap.get(word) + " ");
+			}
+			writer.println();
+		}
+
+		writer.println("Initial");
+		for (String label : initial.keySet()) {
+			writer.print(label + "-" + initial.get(label) + " ");
+		}
+
+		writer.close();
+	}
+
 	public static void tag() throws Exception {
+		System.out.println("tag()");
+
 		BufferedReader br = new BufferedReader(new FileReader(trainPath));
 		PrintWriter writer = new PrintWriter(outputPath, "UTF-8");
 		String line = null;
@@ -476,8 +604,12 @@ public class PosTagger {
 			// start trellis
 			for (String label : trellis.keySet()) {
 				ArrayList<Double> sentProbs = trellis.get(label);
-				sentProbs
-						.set(0, initial.get(label) * emission.get(label).get(words[0]));
+				Double initProb = initial.get(label);
+				Double emisProb = emission.get(label).get(words[0]);
+				if (emisProb == null) {
+					emisProb = 0.0;
+				}
+				sentProbs.set(0, initProb * emisProb);
 			}
 
 			// recurse
@@ -486,9 +618,13 @@ public class PosTagger {
 					double maxProb = 0.0;
 					String lastTag = "";
 					for (String pLabel : trellis.keySet()) {
-						double result = trellis.get(pLabel).get(i - 1)
-								* transition.get(pLabel).get(label)
-								* emission.get(label).get(words[i]);
+						Double priorProb = trellis.get(pLabel).get(i - 1);
+						Double transProb = transition.get(pLabel).get(label);
+						Double emisProb = emission.get(label).get(words[i]);
+						if (emisProb == null) {
+							emisProb = 0.0;
+						}
+						double result = priorProb * transProb * emisProb;
 						if (result > maxProb) {
 							maxProb = result;
 							lastTag = pLabel;
@@ -520,24 +656,25 @@ public class PosTagger {
 				lastTag = trellisTags.get(lastTag).get(i + 1);
 				tags[i] = lastTag;
 			}
-			
+
 			// write tags
-			for (int i=0; i<tags.length; ++i) {
+			for (int i = 0; i < tags.length; ++i) {
 				writer.print(words[i] + "_" + tags[i] + " ");
 			}
 			writer.println();
 		}
 		writer.close();
+		br.close();
 	}
 
 	public static void main(String[] args) throws Exception {
 		loadLexicon();
-		initTransition();
-		initEmission();
-		initInitial();
-
 		loadTrain();
+		loadWordIndices();
+		initialize();
+
 		executeBaumWelch();
+		printHMM();
 		tag();
 	}
 }
